@@ -67,7 +67,16 @@ def fake(req: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"Modules": [{"Title": "Week 7", "Topics": [
             {"TopicId": 9001, "Title": "Lecture 7", "TypeIdentifier": "File", "Url": "/content/enforced/101/Lecture%207.docx", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
             {"TopicId": 9002, "Title": "Valgrind video", "TypeIdentifier": "Link", "Url": "https://youtube.com/x"},
-        ], "Modules": []}]})
+            {"TopicId": 9003, "Title": "Deleted slides", "TypeIdentifier": "File", "Url": None, "IsBroken": True},
+        ], "Modules": [
+            # real owl: some profs leave modules empty + link the file in the description (link + iframe = same file twice)
+            {"Title": "Week 8", "Topics": [], "Modules": [], "DefaultPath": "/content/enforced/101-X/",
+             "LastModifiedDate": "2026-11-02T00:00:00.000Z",
+             "Description": {"Html": '<a href="/d2l/common/dialogs/quickLink/quickLink.d2l?ou=101&amp;type=coursefile&amp;fileId=Notes%2fLecture+8.docx">L8</a>'
+                                     '<iframe src="/d2l/common/dialogs/quickLink/quickLink.d2l?ou=101&amp;type=coursefile&amp;fileId=Notes%2fLecture+8.docx"></iframe>'}},
+        ]}]})
+    if p == "/content/enforced/101-X/Notes/Lecture 8.docx":
+        return httpx.Response(200, content=DOCX)
     if p == "/d2l/api/le/1.80/101/content/topics/9001/file":
         return httpx.Response(200, content=DOCX)
     return httpx.Response(404)

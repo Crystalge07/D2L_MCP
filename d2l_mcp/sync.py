@@ -10,7 +10,7 @@ re-syncing only downloads topics whose LastModifiedDate changed, so it's fast af
 import json
 import re
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote
+from urllib.parse import quote, unquote, unquote_plus
 
 from . import config
 from .client import D2LClient
@@ -37,6 +37,19 @@ def _walk(modules: list[dict], trail: tuple[str, ...] = ()):
         yield from _walk(m.get("Modules", []), here)
 
 
+def _walk_modules(modules: list[dict], trail: tuple[str, ...] = ()):
+    # recursively yield (folder trail, module) for every module in the content tree
+    for m in modules:
+        here = trail + (safe(m.get("Title", "module")),)
+        yield here, m
+        yield from _walk_modules(m.get("Modules", []), here)
+
+
+# some profs don't add files as topics at all — they leave the module empty and link the pdf in the
+# module's description html, e.g. <a href="/d2l/common/dialogs/quickLink/quickLink.d2l?ou=1&type=coursefile&fileId=Notes%2fLec1.pdf">
+_COURSEFILE_LINK = re.compile(r"type=coursefile&(?:amp;)?fileId=([^\"'&<>\s]+)")
+
+
 def _filename(topic: dict) -> str:
     # topic Url is usually like /content/enforced/12345-CS2211/Lecture%205.pdf -> use the real filename.
     # if that's missing, fall back to the topic title
@@ -52,7 +65,27 @@ async def sync_course(client: D2LClient, course: dict) -> dict:
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
     toc = await client.toc(course["id"])
-    stats = {"downloaded": 0, "unchanged": 0, "links": 0, "failed": []}
+    stats = {"downloaded": 0, "unchanged": 0, "links": 0, "broken": 0, "failed": []}
+
+    async def fetch(key: str, title: str, rel: Path, modified: str | None, module: str, download) -> None:
+        prev = manifest.get(key)
+        # skip if we already have it AND prof hasn't re-uploaded since
+        if prev and prev.get("modified") == modified and (cdir / prev["path"]).exists():
+            stats["unchanged"] += 1
+            return
+        dest = cdir / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            dest.write_bytes(await download())
+            text = extract_text(dest)
+            if text is not None:
+                # sidecar .txt right next to the original, e.g. "Lecture 5.pdf.txt"
+                dest.with_name(dest.name + ".txt").write_text(text)
+        except Exception as e:  # one broken file shouldn't kill the whole sync
+            stats["failed"].append(f"{rel}: {e}")
+            return
+        manifest[key] = {"title": title, "type": "file", "path": str(rel), "modified": modified, "module": module}
+        stats["downloaded"] += 1
 
     for trail, topic in _walk(toc.get("Modules", [])):
         key = str(topic["TopicId"])
@@ -63,29 +96,34 @@ async def sync_course(client: D2LClient, course: dict) -> dict:
             stats["links"] += 1
             continue
 
-        modified = topic.get("LastModifiedDate")
-        prev = manifest.get(key)
-        # skip if we already have it AND prof hasn't re-uploaded since
-        if prev and prev.get("modified") == modified and (cdir / prev["path"]).exists():
-            stats["unchanged"] += 1
+        # prof deleted/moved the file but left the topic up — owl shows it broken too, nothing to get
+        if topic.get("IsBroken"):
+            stats["broken"] += 1
             continue
 
-        rel = Path(*trail) / _filename(topic)
-        dest = cdir / rel
-        dest.parent.mkdir(parents=True, exist_ok=True)
+        await fetch(
+            key, topic.get("Title"), Path(*trail) / _filename(topic), topic.get("LastModifiedDate"), "/".join(trail),
+            lambda t=topic: client.topic_file(course["id"], t["TopicId"]),
+        )
 
-        try:
-            dest.write_bytes(await client.topic_file(course["id"], topic["TopicId"]))
-            text = extract_text(dest)
-            if text is not None:
-                # sidecar .txt right next to the original, e.g. "Lecture 5.pdf.txt"
-                dest.with_name(dest.name + ".txt").write_text(text)
-        except Exception as e:  # one broken file shouldn't kill the whole sync
-            stats["failed"].append(f"{rel}: {e}")
+    # files linked from module descriptions instead of being topics (see _COURSEFILE_LINK)
+    # profs re-link the same notes in "Week 4 (Continued)" etc — keep each file once, under the first module
+    seen: set[str] = set()
+    for trail, module in _walk_modules(toc.get("Modules", [])):
+        prefix = module.get("DefaultPath")  # e.g. /content/enforced/203951-UGRD_1269_11219/
+        html = (module.get("Description") or {}).get("Html") or ""
+        if not prefix:
             continue
-
-        manifest[key] = {"title": topic.get("Title"), "type": "file", "path": str(rel), "modified": modified, "module": "/".join(trail)}
-        stats["downloaded"] += 1
+        for file_id in _COURSEFILE_LINK.findall(html):
+            remote = unquote_plus(file_id)  # "Notes%2fLec 1.pdf" -> "Notes/Lec 1.pdf"
+            if remote in seen:  # also catches link + iframe preview of the same file
+                continue
+            seen.add(remote)
+            name = safe(PurePosixPath(remote).name)
+            await fetch(
+                f"coursefile:{remote}", name, Path(*trail) / name, module.get("LastModifiedDate"), "/".join(trail),
+                lambda url=prefix.rstrip("/") + "/" + quote(remote): client.get_bytes(url),
+            )
 
     manifest_path.write_text(json.dumps(manifest, indent=2))
     stats["folder"] = str(cdir)

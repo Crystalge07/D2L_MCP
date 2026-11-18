@@ -175,7 +175,7 @@ async def sync_course_files(course: str) -> str:
     for the first time, or when the user says new material was posted."""
     c = await resolve_course(course)
     s = await sync_course(client, c)
-    msg = f"synced {c['name']}: {s['downloaded']} downloaded, {s['unchanged']} unchanged, {s['links']} links skipped.\nfolder: {s['folder']}"
+    msg = f"synced {c['name']}: {s['downloaded']} downloaded, {s['unchanged']} unchanged, {s['links']} links skipped, {s['broken']} broken on OWL.\nfolder: {s['folder']}"
     if s["failed"]:
         msg += "\nfailed:\n" + "\n".join(f"- {f}" for f in s["failed"])
     return msg

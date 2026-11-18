@@ -4,8 +4,12 @@ page/slide markers ("--- page 4 ---") are on purpose: lets claude say
 "this is on slide 12 of lecture 5" instead of just vibes
 """
 import html
+import logging
 import re
 from pathlib import Path
+
+# pypdf spams "Ignoring wrong pointing object" etc for lots of prof-made pdfs. harmless, hide it
+logging.getLogger("pypdf").setLevel(logging.ERROR)
 
 # file types we just read as-is (code, notes, etc)
 PLAIN = {".txt", ".md", ".c", ".h", ".cpp", ".hpp", ".py", ".java", ".sh", ".csv", ".json", ".sql"}
