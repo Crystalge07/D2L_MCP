@@ -11,7 +11,10 @@ import sys
 from . import config
 
 # what to tell the user whenever they need to (re)login. claude sees this + can call the tool itself
-LOGIN_HINT = "use the login_to_owl tool (opens a browser window to sign in), or run `d2l-mcp-login` in a terminal."
+LOGIN_HINT = (
+    "use the login_to_owl tool (opens a browser window to sign in), "
+    "or run `uv run d2l-mcp-login` in the d2l-mcp folder."
+)
 
 
 class NotLoggedIn(Exception):

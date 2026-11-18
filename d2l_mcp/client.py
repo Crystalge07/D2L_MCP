@@ -139,6 +139,16 @@ class D2LClient:
         le = await self.ver("le")
         return await self.get(f"/d2l/api/le/{le}/{org_id}/dropbox/folders/")
 
+    async def my_submissions(self, org_id: int, folder_id: int) -> list[dict]:
+        # what u turned in to one assignment: [{Submitter, Submissions: [{SubmissionDate, Files...}]}]
+        le = await self.ver("le")
+        return await self.get(f"/d2l/api/le/{le}/{org_id}/dropbox/folders/{folder_id}/submissions/mysubmissions/")
+
+    async def dropbox_attachment(self, org_id: int, folder_id: int, file_id: int) -> bytes:
+        # files the prof attached to an assignment (handouts, starter code)
+        le = await self.ver("le")
+        return await self.get_bytes(f"/d2l/api/le/{le}/{org_id}/dropbox/folders/{folder_id}/attachments/{file_id}")
+
     async def quizzes(self, org_id: int) -> list[dict]:
         # quizzes use a diff paging style: {Objects: [...], Next: "full url or null"}
         le = await self.ver("le")

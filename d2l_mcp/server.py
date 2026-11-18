@@ -6,6 +6,7 @@ token usage low. docstrings matter a LOT here — they're what claude reads to d
 import asyncio
 import functools
 from datetime import datetime, timedelta
+from pathlib import PurePosixPath
 
 import httpx
 from mcp.server.mcpserver import MCPServer  # mcp sdk 2.x name (was FastMCP in 1.x)
@@ -14,7 +15,7 @@ from . import auth, config
 from .auth import NotLoggedIn
 from .client import AuthExpired, D2LClient, parse_date
 from .extract import strip_html
-from .sync import course_dir, search, sync_course
+from .sync import INSTRUCTIONS_DIR, course_dir, linked_files, search, sync_course
 
 mcp = MCPServer(
     "d2l",
@@ -126,10 +127,26 @@ async def get_announcements(course: str, limit: int = 5) -> str:
     return f"# {c['name']}\n\n" + "\n\n".join(out) if out else f"no announcements in {c['name']}"
 
 
+async def _submitted(org_id: int, folder_id) -> str:
+    # " ✅ submitted" if u've turned anything in to this assignment, else "". unknown -> "" (don't guess)
+    if folder_id is None:
+        return ""
+    try:
+        subs = await client.my_submissions(org_id, folder_id)
+    except httpx.HTTPStatusError:
+        return ""
+    dates = [s.get("SubmissionDate") for e in subs for s in e.get("Submissions", [])]
+    if not dates:
+        return ""
+    last = parse_date(max(d for d in dates if d)) if any(dates) else None
+    return f" ✅ submitted{f' {last:%b %d %I:%M %p}' if last else ''}"
+
+
 @mcp.tool()
 @friendly_errors
 async def get_upcoming_due_dates(days: int = 14, course: str | None = None) -> str:
-    """Assignments + quizzes due in the next `days` days, across all current courses (or one course)."""
+    """Assignments + quizzes due in the next `days` days, across all current courses (or one course).
+    Assignments the user already submitted are marked ✅ submitted — don't tell them to do those."""
     courses = [await resolve_course(course)] if course else await client.my_courses()
     now = datetime.now().astimezone()
     cutoff = now + timedelta(days=days)
@@ -138,23 +155,54 @@ async def get_upcoming_due_dates(days: int = 14, course: str | None = None) -> s
     for c in courses:
         # assignments and quizzes are separate tools in d2l, check both.
         # wrapped in try bc some courses just don't have one of them turned on (403/404)
-        for kind, fetch, name_key, due_key in (
-            ("assignment", client.assignments, "Name", "DueDate"),
-            ("quiz", client.quizzes, "Name", "DueDate"),
-        ):
+        for kind, fetch in (("assignment", client.assignments), ("quiz", client.quizzes)):
             try:
                 items = await fetch(c["id"])
             except httpx.HTTPStatusError:
                 continue
             for it in items:
-                due = parse_date(it.get(due_key))
+                due = parse_date(it.get("DueDate"))
                 if due and now <= due <= cutoff:
-                    rows.append((due, c["code"] or c["name"], kind, it.get(name_key)))
+                    # only assignments have a student-readable "my submissions" endpoint
+                    status = await _submitted(c["id"], it.get("Id")) if kind == "assignment" else ""
+                    rows.append((due, c["code"] or c["name"], kind, it.get("Name"), status))
 
-    rows.sort()  # tuples sort by due date first
+    rows.sort(key=lambda r: r[0])
     if not rows:
         return f"nothing due in the next {days} days 🎉"
-    return "\n".join(f"- {d:%a %b %d %I:%M %p} | {code} | {kind}: {name}" for d, code, kind, name in rows)
+    return "\n".join(f"- {d:%a %b %d %I:%M %p} | {code} | {kind}: {name}{st}" for d, code, kind, name, st in rows)
+
+
+@mcp.tool()
+@friendly_errors
+async def get_assignment_details(course: str, assignment: str) -> str:
+    """Full details for one assignment/lab: instructions, due date, attached files, and whether the user
+    submitted it. `assignment` is part of its name, e.g. 'lab 7' or 'assignment 2'."""
+    c = await resolve_course(course)
+    folders = await client.assignments(c["id"])
+    q = " ".join(assignment.lower().replace("#", " ").split())
+    hits = [f for f in folders if q in " ".join((f.get("Name") or "").lower().replace("#", " ").split())]
+    if len(hits) != 1:
+        names = "\n".join(f"- {f.get('Name')}" for f in folders) or "(none)"
+        what = "no assignment" if not hits else "more than one assignment"
+        return f"{what} matching '{assignment}' in {c['code']}. assignments:\n{names}"
+    f = hits[0]
+    due = parse_date(f.get("DueDate"))
+    end = parse_date((f.get("Availability") or {}).get("EndDate"))
+    lines = [f"# {f.get('Name')} ({c['code']})"]
+    lines.append(f"due: {due:%a %b %d %I:%M %p}" if due else "due: (no due date set)")
+    if end and end != due:
+        lines.append(f"closes (late submissions until): {end:%a %b %d %I:%M %p}")
+    lines.append(f"status:{await _submitted(c['id'], f.get('Id')) or ' not submitted yet'}")
+    html = (f.get("CustomInstructions") or {}).get("Html") or ""
+    text = strip_html(html) or (f.get("CustomInstructions") or {}).get("Text") or ""
+    lines.append("\n## instructions\n" + (text or "(no instructions written on the assignment page)"))
+    files = [a.get("FileName") for a in f.get("Attachments") or []]
+    files += [PurePosixPath(p).name for p in linked_files(html, f"/content/enforced/{c['id']}-{c.get('raw_code')}/")]
+    if files:
+        lines.append("\n## files\n" + "\n".join(f"- {n}" for n in files))
+        lines.append(f"(sync_course_files saves these under '{INSTRUCTIONS_DIR}' so they can be searched/read)")
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -188,7 +236,12 @@ async def get_course_outline(course: str) -> str:
             lines.append("  " * depth + f"📁 {m.get('Title')}")
             for t in m.get("Topics", []):
                 icon = "📄" if t.get("TypeIdentifier") == "File" else "🔗"
-                lines.append("  " * (depth + 1) + f"{icon} {t.get('Title')}")
+                broken = " (broken link on OWL)" if t.get("IsBroken") else ""
+                lines.append("  " * (depth + 1) + f"{icon} {t.get('Title')}{broken}")
+            # some profs leave modules empty + link the files in the module description instead
+            html = (m.get("Description") or {}).get("Html") or ""
+            for remote in linked_files(html, m.get("DefaultPath") or ""):
+                lines.append("  " * (depth + 1) + f"📄 {PurePosixPath(remote).name}")
             walk(m.get("Modules", []), depth + 1)
 
     walk(toc.get("Modules", []))
@@ -197,15 +250,59 @@ async def get_course_outline(course: str) -> str:
 
 # =============== SYNC + SEARCH (local copies of course files) ===============
 
+# a first sync can take minutes, longer than claude apps wait for one tool call. so syncs run as
+# background tasks: the tool waits up to SYNC_WAIT secs, and if it's not done says "still going, ask again".
+# asking again picks up the SAME task (never starts a 2nd one), and returns its result once finished
+SYNC_WAIT = 40
+_sync_tasks: dict[str, asyncio.Task] = {}
+_sync_lock = asyncio.Lock()  # one sync at a time, so 2 syncs never write the same course folder at once
+
+
+async def _in_background(key: str, make) -> str | None:
+    task = _sync_tasks.get(key)
+    if task is None:
+        async def locked():
+            async with _sync_lock:
+                return await make()
+        task = _sync_tasks[key] = asyncio.create_task(locked())
+    try:
+        result = await asyncio.wait_for(asyncio.shield(task), SYNC_WAIT)
+    except asyncio.TimeoutError:
+        return None  # still running
+    except asyncio.CancelledError:
+        raise  # claude gave up on this call — task keeps going, next call picks it up
+    except Exception:
+        _sync_tasks.pop(key, None)  # failed (e.g. session expired) -> next call starts fresh
+        raise
+    _sync_tasks.pop(key, None)
+    return result
+
+
+def _sync_summary(s: dict) -> str:
+    parts = [f"{s['downloaded']} downloaded", f"{s['unchanged']} unchanged"]
+    for k, label in (("removed", "removed (gone from OWL)"), ("skipped", "skipped (video/keynote)"),
+                     ("broken", "broken on OWL"), ("links", "web links")):
+        if s.get(k):
+            parts.append(f"{s[k]} {label}")
+    return ", ".join(parts)
+
+
+STILL_SYNCING = ("still syncing in the background (the first sync of a course can take a few minutes). "
+                 "call this tool again in a minute to get the result.")
+
+
 @mcp.tool()
 @friendly_errors
 async def sync_course_files(course: str) -> str:
-    """Download a course's content files (slides, PDFs, docs) to the user's computer and extract their text
-    so they can be searched. Only re-downloads files that changed. Run this before searching a course
-    for the first time, or when the user says new material was posted."""
+    """Download a course's content files (slides, PDFs, docs, assignment handouts) to the user's computer and
+    extract their text so they can be searched. Only re-downloads files that changed. Run this before searching
+    a course for the first time, or when the user says new material was posted. If it says it's still syncing,
+    call it again after a bit to get the result."""
     c = await resolve_course(course)
-    s = await sync_course(client, c)
-    msg = f"synced {c['name']}: {s['downloaded']} downloaded, {s['unchanged']} unchanged, {s['links']} links skipped, {s['broken']} broken on OWL.\nfolder: {s['folder']}"
+    s = await _in_background(f"course:{c['id']}", lambda: sync_course(client, c))
+    if s is None:
+        return STILL_SYNCING
+    msg = f"synced {c['name']}: {_sync_summary(s)}.\nfolder: {s['folder']}"
     if s["failed"]:
         msg += "\nfailed:\n" + "\n".join(f"- {f}" for f in s["failed"])
     return msg
@@ -214,12 +311,17 @@ async def sync_course_files(course: str) -> str:
 @mcp.tool()
 @friendly_errors
 async def sync_all_courses() -> str:
-    """Sync content files for every current course. Slow the first time, quick after."""
-    out = []
-    for c in await client.my_courses():
-        s = await sync_course(client, c)
-        out.append(f"- {c['code'] or c['name']}: {s['downloaded']} new, {s['unchanged']} unchanged, {len(s['failed'])} failed")
-    return "\n".join(out) or "no current courses"
+    """Sync content files for every current course. Slow the first time, quick after. If it says it's still
+    syncing, call it again after a bit to get the result."""
+    async def run():
+        out = []
+        for c in await client.my_courses():
+            s = await sync_course(client, c)
+            fails = f", {len(s['failed'])} failed" if s["failed"] else ""
+            out.append(f"- {c['code'] or c['name']}: {_sync_summary(s)}{fails}")
+        return "\n".join(out) or "no current courses"
+    result = await _in_background("all", run)
+    return STILL_SYNCING if result is None else result
 
 
 @mcp.tool()

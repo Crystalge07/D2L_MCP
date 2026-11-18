@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -33,6 +34,25 @@ DOCX = buf.getvalue()
 
 soon = (datetime.now(timezone.utc) + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 expired = {"on": False, "mode": "redirect"}  # flip to simulate session dying
+lecture7_deleted = {"on": False}  # flip to simulate prof removing a file from owl
+
+# zipped lecture code (search should see inside it, even w/ a phrase split across lines)
+buf = io.BytesIO()
+with zipfile.ZipFile(buf, "w") as z:
+    z.writestr("code/bst.c", "/* a binary\n   search tree */\nint main(void) { return 0; }")
+    z.writestr("__MACOSX/._bst.c", "junk")
+ZIP = buf.getvalue()
+
+# an owl html page whose only job is linking the real file (like 2210's "File for Assignment 1")
+PAGE = '<p>File for A3: <a href="https://fake.brightspace.com/content/enforced/101-X/Starter.java">Starter.java</a></p>'
+
+DROPBOX = [
+    {"Id": 501, "Name": "Assignment 4", "DueDate": soon,
+     "CustomInstructions": {"Html": '<p>Implement a linked list. Handout: <a href="/d2l/common/dialogs/quickLink/quickLink.d2l?ou=101&amp;type=coursefile&amp;fileId=Labs%2flab4.c">lab4.c</a></p>'},
+     "Attachments": [{"FileId": 77, "FileName": "a4-handout.docx", "Size": 123}]},
+    {"Id": 502, "Name": "Assignment 5", "DueDate": soon, "CustomInstructions": {"Html": ""}, "Attachments": []},
+    {"Id": 500, "Name": "Old A1", "DueDate": "2026-09-01T04:00:00.000Z"},
+]
 
 
 def fake(req: httpx.Request) -> httpx.Response:
@@ -56,7 +76,21 @@ def fake(req: httpx.Request) -> httpx.Response:
     if p == "/d2l/api/le/1.80/101/news/":
         return httpx.Response(200, json=[{"Title": "Midterm room change", "StartDate": "2026-11-10T14:00:00.000Z", "Body": {"Html": "<p>Midterm is in <b>NS 145</b> now.</p>", "Text": ""}}])
     if p == "/d2l/api/le/1.80/101/dropbox/folders/":
-        return httpx.Response(200, json=[{"Name": "Assignment 4", "DueDate": soon}, {"Name": "Old A1", "DueDate": "2026-09-01T04:00:00.000Z"}])
+        return httpx.Response(200, json=DROPBOX)
+    if p == "/d2l/api/le/1.80/101/dropbox/folders/501/submissions/mysubmissions/":
+        return httpx.Response(200, json=[{"Submissions": [{"SubmissionDate": "2026-11-17T20:00:00.000Z"}]}])
+    if p == "/d2l/api/le/1.80/101/dropbox/folders/502/submissions/mysubmissions/":
+        return httpx.Response(200, json=[])
+    if p == "/d2l/api/le/1.80/101/dropbox/folders/501/attachments/77":
+        return httpx.Response(200, content=DOCX)
+    if p == "/content/enforced/101-X/Labs/lab4.c":
+        return httpx.Response(200, content=b"// lab 4 starter: linked list\nstruct node { int v; struct node *next; };")
+    if p == "/content/enforced/101-X/Starter.java":
+        return httpx.Response(200, content=b"public class Starter { /* hash table */ }")
+    if p == "/d2l/api/le/1.80/101/content/topics/9004/file":
+        return httpx.Response(200, text=PAGE)
+    if p == "/d2l/api/le/1.80/101/content/topics/9006/file":
+        return httpx.Response(200, content=ZIP)
     if p == "/d2l/api/le/1.80/101/quizzes/":
         # 2 pages; real owl's Next is a full absolute url
         if "bookmark" not in req.url.params:
@@ -67,11 +101,17 @@ def fake(req: httpx.Request) -> httpx.Response:
     if p == "/d2l/api/le/1.80/101/grades/values/myGradeValues/":
         return httpx.Response(200, json=[{"GradeObjectName": "Assignment 1", "DisplayedGrade": "92 %"}])
     if p == "/d2l/api/le/1.80/101/content/toc":
-        return httpx.Response(200, json={"Modules": [{"Title": "Week 7", "Topics": [
-            {"TopicId": 9001, "Title": "Lecture 7", "TypeIdentifier": "File", "Url": "/content/enforced/101/Lecture%207.docx", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
+        topics = [
+            {"TopicId": 9001, "Title": "Lecture 7", "TypeIdentifier": "File", "Url": "/content/enforced/101-X/Lecture%207.docx", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
             {"TopicId": 9002, "Title": "Valgrind video", "TypeIdentifier": "Link", "Url": "https://youtube.com/x"},
             {"TopicId": 9003, "Title": "Deleted slides", "TypeIdentifier": "File", "Url": None, "IsBroken": True},
-        ], "Modules": [
+            {"TopicId": 9004, "Title": "File for A3", "TypeIdentifier": "File", "Url": "/content/enforced/101-X/a3page.html", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
+            {"TopicId": 9005, "Title": "Lecture 7 (Keynote)", "TypeIdentifier": "File", "Url": "/content/enforced/101-X/Lecture7.key", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
+            {"TopicId": 9006, "Title": "Lecture 7 code", "TypeIdentifier": "File", "Url": "/content/enforced/101-X/lec7code.zip", "LastModifiedDate": "2026-11-01T00:00:00.000Z"},
+        ]
+        if lecture7_deleted["on"]:
+            topics = topics[1:]
+        return httpx.Response(200, json={"Modules": [{"Title": "Week 7", "Topics": topics, "DefaultPath": "/content/enforced/101-X/", "Modules": [
             # real owl: some profs leave modules empty + link the file in the description (link + iframe = same file twice)
             {"Title": "Week 8", "Topics": [], "Modules": [], "DefaultPath": "/content/enforced/101-X/",
              "LastModifiedDate": "2026-11-02T00:00:00.000Z",
@@ -93,8 +133,27 @@ async def main():
     print(await server.get_upcoming_due_dates(days=7), "\n")
     print(await server.get_grades("2211"), "\n")
     print(await server.get_course_outline("2211"), "\n")
-    print(await server.sync_course_files("2211"), "\n")
-    print(await server.sync_course_files("2211"), "  <- 2nd sync should be all unchanged\n")
+    due = await server.get_upcoming_due_dates(days=7)
+    assert "Assignment 4 ✅ submitted" in due and "Assignment 5\n" in due + "\n", due
+    print(await server.get_assignment_details("2211", "assignment 4"), "\n")
+    outline = await server.get_course_outline("2211")
+    assert "Lecture 8.docx" in outline and "broken link on OWL" in outline, outline
+
+    s1 = await server.sync_course_files("2211"); print(s1, "\n")
+    assert "7 downloaded" in s1 and "1 skipped" in s1, s1  # L7, page, zip, L8, A4 handout, lab4.c, Starter.java; .key skipped
+    s2 = await server.sync_course_files("2211"); print(s2, "  <- 2nd sync should be all unchanged\n")
+    assert "0 downloaded" in s2, s2
+    for q, want in (("linked list", "lab4.c"), ("hash table", "Starter.java"), ("binary search", "file code/bst.c"),
+                    ("implement a linked", "Instructions.html")):
+        r = await server.search_course_files(q)
+        assert want in r, (q, r)
+    print(await server.search_course_files("binary search"), "  <- inside zip, phrase split across lines\n")
+
+    lecture7_deleted["on"] = True
+    s3 = await server.sync_course_files("2211"); print(s3, "  <- prof deleted Lecture 7\n")
+    assert "1 removed" in s3 and not (config.SYNC_DIR / "COMPSCI-2211A/Week 7/Lecture 7.docx").exists(), s3
+    lecture7_deleted["on"] = False
+    await server.sync_course_files("2211")  # put it back for the read test below
     print(await server.search_course_files("malloc"), "\n")
     print(await server.list_synced_files("2211"), "\n")
     print(await server.read_course_file("COMPSCI-2211A/Week 7/Lecture 7.docx"), "\n")

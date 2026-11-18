@@ -56,4 +56,17 @@ def extract_text(path: Path) -> str | None:
     if ext in PLAIN:
         return path.read_text(errors="ignore")
 
-    return None  # .zip, images, videos, .ppt (old format) etc — saved but not searchable
+    if ext == ".zip":
+        # lecture code usually comes zipped. pull out the text/code files inside (skip mac junk + huge files)
+        import zipfile
+        out = []
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                name = info.filename
+                if info.is_dir() or "__MACOSX" in name or Path(name).name.startswith("."):
+                    continue
+                if Path(name).suffix.lower() in PLAIN | {".html", ".htm"} and info.file_size <= 2_000_000:
+                    out.append(f"--- file {name} ---\n" + z.read(info).decode("utf-8", errors="ignore"))
+        return "\n\n".join(out) or None
+
+    return None  # images, .ppt (old format) etc — saved but not searchable
