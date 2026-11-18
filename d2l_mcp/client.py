@@ -58,10 +58,10 @@ class D2LClient:
                 break
             nxt = r.next_request
             if nxt is None or "/d2l/login" in str(nxt.url) or nxt.url.host != expected_host:
-                raise AuthExpired("D2L session expired. run `d2l-mcp-login` in a terminal, then try again.")
+                raise AuthExpired(f"OWL session expired. {auth.LOGIN_HINT}")
             r = await http.send(nxt)
         else:
-            raise AuthExpired("D2L kept redirecting (session probably expired). run `d2l-mcp-login`.")
+            raise AuthExpired(f"OWL kept redirecting (session probably expired). {auth.LOGIN_HINT}")
 
         # real brightspace answers api calls w/ a dead/missing session as 403 + body "Authentication required"
         # (not a redirect or 401). must catch it here, otherwise it looks like "tool turned off for this course"
@@ -71,7 +71,7 @@ class D2LClient:
         if r.status_code == 401 or (
             r.status_code == 403 and ("authentication required" in r.text.lower() or not await self._session_alive())
         ):
-            raise AuthExpired("D2L session expired. run `d2l-mcp-login` in a terminal, then try again.")
+            raise AuthExpired(f"OWL session expired. {auth.LOGIN_HINT}")
 
         r.raise_for_status()  # 403/404/500 bubble up as httpx.HTTPStatusError
         return r

@@ -6,18 +6,31 @@ d2l gave the browser. the mcp server sends those cookies w/ every api request = 
 """
 import asyncio
 import json
+import sys
 
 from . import config
 
+# what to tell the user whenever they need to (re)login. claude sees this + can call the tool itself
+LOGIN_HINT = "use the login_to_owl tool (opens a browser window to sign in), or run `d2l-mcp-login` in a terminal."
+
 
 class NotLoggedIn(Exception):
-    """no cookie file yet, or the session expired — either way u gotta run the login cmd"""
+    """no cookie file yet, or the session expired — either way u gotta log in"""
+
+
+class LoginFailed(Exception):
+    """timed out waiting for u to finish logging in"""
+
+
+def log(msg: str) -> None:
+    # stderr, NOT print(): when running as the mcp server, stdout IS the connection to claude
+    print(msg, file=sys.stderr, flush=True)
 
 
 def load_cookies() -> dict[str, str]:
     # cookies.json is just {name: value}, written by login() below
     if not config.COOKIE_FILE.exists():
-        raise NotLoggedIn("no saved D2L session. run `d2l-mcp-login` in a terminal first.")
+        raise NotLoggedIn(f"not logged in to OWL yet. {LOGIN_HINT}")
     return json.loads(config.COOKIE_FILE.read_text())
 
 
@@ -37,8 +50,8 @@ async def login() -> None:
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
 
         await page.goto(f"{config.BASE_URL}/d2l/home")
-        print("👉 log in in the browser window that just opened (sso + mfa).")
-        print("   i'll grab the session automatically once u land on the D2L homepage.")
+        log("👉 log in in the browser window that just opened (sso + mfa).")
+        log("   i'll grab the session automatically once u land on the D2L homepage.")
 
         # can't just wait for the url to be /d2l/home: when logged out, d2l serves a 200 page AT
         # /d2l/home that js-redirects to /d2l/login, so the url check would pass before u log in.
@@ -51,7 +64,8 @@ async def login() -> None:
             await asyncio.sleep(2)
         else:
             await ctx.close()
-            raise SystemExit("❌ timed out waiting for login (5 min). run d2l-mcp-login again.")
+            # regular exception (not SystemExit) so it can't kill the mcp server when login runs from claude
+            raise LoginFailed("timed out waiting for login (5 min). try logging in again.")
 
         # only cookies that apply to the brightspace domain (skip microsoft's etc)
         cookies = await ctx.cookies(config.BASE_URL)
@@ -61,16 +75,19 @@ async def login() -> None:
 
     # sanity check — d2lSessionVal + d2lSecureSessionVal are THE session cookies
     if "d2lSessionVal" not in jar:
-        print("⚠️  didn't see d2lSessionVal — login might not have worked. saving anyway.")
+        log("⚠️  didn't see d2lSessionVal — login might not have worked. saving anyway.")
 
     config.COOKIE_FILE.write_text(json.dumps(jar, indent=2))
     config.COOKIE_FILE.chmod(0o600)  # cookies = ur login. only u should be able to read this file
-    print(f"✅ saved session to {config.COOKIE_FILE}")
+    log(f"✅ saved session to {config.COOKIE_FILE}")
 
 
 def main() -> None:
     # entry point for the `d2l-mcp-login` command (see pyproject.toml)
-    asyncio.run(login())
+    try:
+        asyncio.run(login())
+    except LoginFailed as e:
+        raise SystemExit(f"❌ {e}")
 
 
 if __name__ == "__main__":

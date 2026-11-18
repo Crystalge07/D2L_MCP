@@ -3,13 +3,14 @@
 every tool returns plain text (not json) on purpose: claude reads text better and it keeps
 token usage low. docstrings matter a LOT here — they're what claude reads to decide which tool to call
 """
+import asyncio
 import functools
 from datetime import datetime, timedelta
 
 import httpx
 from mcp.server.mcpserver import MCPServer  # mcp sdk 2.x name (was FastMCP in 1.x)
 
-from . import config
+from . import auth, config
 from .auth import NotLoggedIn
 from .client import AuthExpired, D2LClient, parse_date
 from .extract import strip_html
@@ -21,7 +22,8 @@ mcp = MCPServer(
     instructions=(
         "Tools for the user's D2L Brightspace (Western OWL) account. When the user mentions a course, "
         "lecture, assignment, announcement or grade, use these instead of asking for screenshots. "
-        "For questions about course material, search_course_files first; if empty, sync_course_files then search again."
+        "For questions about course material, search_course_files first; if empty, sync_course_files then search again. "
+        "If a tool says the user isn't logged in or the session expired, call login_to_owl."
     ),
 )
 client = D2LClient()  # one shared client = cookies + api versions + course list cached across calls
@@ -29,7 +31,7 @@ client = D2LClient()  # one shared client = cookies + api versions + course list
 
 def friendly_errors(fn):
     # wraps every tool so auth problems come back as a readable msg instead of a stack trace.
-    # claude will relay "run d2l-mcp-login" to u instead of being confused
+    # the msg tells claude about login_to_owl, so it can offer/call it instead of being confused
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
         try:
@@ -66,6 +68,34 @@ async def resolve_course(query: str) -> dict:
     if not hits:
         raise ValueError(f"no course matching '{query}'. ur courses:\n{names}")
     raise ValueError(f"'{query}' matches multiple courses, be more specific:\n{names}")
+
+
+# =============== LOGIN ===============
+
+_login_task: asyncio.Task | None = None  # the browser login running in the background, if any
+
+
+@mcp.tool()
+async def login_to_owl() -> str:
+    """Log the user in to OWL (D2L). Opens a browser window on their computer where they sign in with
+    Microsoft SSO + MFA themselves. Call this when another tool says the user isn't logged in or the
+    session expired. Returns quickly: if they're still signing in, tell them to finish in the window and
+    then ask again — the other tools pick up the new session automatically."""
+    global _login_task
+    if _login_task is not None and not _login_task.done():
+        return "the OWL login window is already open — finish signing in there, then ask again."
+    _login_task = asyncio.create_task(auth.login())
+    try:
+        # microsoft usually remembers the browser, so this often finishes in a few secs w/ no clicks
+        await asyncio.wait_for(asyncio.shield(_login_task), timeout=25)
+    except asyncio.TimeoutError:
+        return ("opened a browser window for OWL — sign in there (Microsoft + MFA). it'll close by itself "
+                "once ur in (5 min limit). then ask again.")
+    except auth.LoginFailed as e:
+        return f"login didn't finish: {e}"
+    except Exception as e:  # e.g. playwright's browser not installed
+        return f"couldn't open the login window: {e}"
+    return "✅ logged in to OWL. go ahead and ask again."
 
 
 # =============== LIVE TOOLS (always fresh from d2l) ===============
