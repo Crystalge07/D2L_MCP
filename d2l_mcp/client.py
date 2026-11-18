@@ -122,7 +122,7 @@ class D2LClient:
                     "name": e["OrgUnit"]["Name"],
                     "code": _short_code(e["OrgUnit"]["Name"], e["OrgUnit"].get("Code") or ""),
                     "raw_code": e["OrgUnit"].get("Code") or "",  # owl's is internal, e.g. UGRD_1269_9222
-                    "active": _is_current(e.get("Access") or {}, now),
+                    "active": _is_current(e.get("Access") or {}, now, e["OrgUnit"]["Name"]),
                     "can_access": bool(e.get("Access", {}).get("CanAccess", True)),
                 }
                 for e in raw
@@ -172,15 +172,24 @@ def _short_code(name: str, fallback: str) -> str:
     return m.group(1) if m else fallback
 
 
-def _is_current(access: dict, now: datetime) -> bool:
-    # owl leaves IsActive=true on old courses for years (FW25 courses end in 2027), so it can't
-    # tell this term from last. use StartDate instead: started within ~10 months (or starts within a month)
+def _is_half_course(name: str) -> bool:
+    # western suffixes: letter (A/B/F/G/...) = half course, one term. no letter = full year
+    m = _COURSE_CODE.match(name)
+    return bool(m and m.group(1)[-1].isalpha())
+
+
+def _is_current(access: dict, now: datetime, name: str = "") -> bool:
+    # owl leaves IsActive=true on old courses for years (FW25 courses end in 2027) and EndDate is
+    # just as useless, so go by StartDate: owl opens fall courses ~aug 9 and winter ones ~dec 5.
+    # half course = one term, so ~5 months (aug 9 -> early jan, dec 5 -> early may, past exams).
+    # full-year/unknown = ~10 months. also show courses opening within the next month
     if not access.get("IsActive"):
         return False
     start = parse_date(access.get("StartDate"))
     if start is None:
         return True
-    return now - timedelta(days=300) <= start <= now + timedelta(days=30)
+    span = timedelta(days=150 if _is_half_course(name) else 300)
+    return now - span <= start <= now + timedelta(days=30)
 
 
 def parse_date(s: str | None) -> datetime | None:

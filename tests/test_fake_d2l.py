@@ -58,7 +58,10 @@ def fake(req: httpx.Request) -> httpx.Response:
     if p == "/d2l/api/le/1.80/101/dropbox/folders/":
         return httpx.Response(200, json=[{"Name": "Assignment 4", "DueDate": soon}, {"Name": "Old A1", "DueDate": "2026-09-01T04:00:00.000Z"}])
     if p == "/d2l/api/le/1.80/101/quizzes/":
-        return httpx.Response(200, json={"Objects": [{"Name": "Quiz 3", "DueDate": soon}], "Next": None})
+        # 2 pages; real owl's Next is a full absolute url
+        if "bookmark" not in req.url.params:
+            return httpx.Response(200, json={"Objects": [{"Name": "Quiz 3", "DueDate": soon}], "Next": "https://fake.brightspace.com/d2l/api/le/1.80/101/quizzes/?bookmark=2"})
+        return httpx.Response(200, json={"Objects": [{"Name": "Quiz 4 (page 2)", "DueDate": soon}], "Next": None})
     if p.startswith("/d2l/api/le/1.80/102/"):
         return httpx.Response(403)  # 2210 has these tools off -> should be skipped gracefully
     if p == "/d2l/api/le/1.80/101/grades/values/myGradeValues/":
@@ -103,6 +106,25 @@ async def main():
     print(await server.get_upcoming_due_dates(), "  <- expired session (403 'Authentication required') must NOT say nothing due\n")
     expired["mode"] = "forbidden"
     print(await server.get_upcoming_due_dates(), "  <- expired session (plain 403 'Forbidden') must NOT say nothing due\n")
+
+    # "current course" rule, w/ real owl names + start dates, checked at different points in the year
+    from d2l_mcp.client import _is_current
+    fall = {"IsActive": True, "StartDate": "2026-08-09T04:00:00.000Z"}
+    winter = {"IsActive": True, "StartDate": "2026-12-05T05:00:00.000Z"}
+    last_winter = {"IsActive": True, "StartDate": "2025-12-05T05:00:00.000Z"}
+    half, full = "COMPSCI 2211A 001 LEC FW26: X", "BUSINESS 2257 001 LEC FW26: X"
+    at = lambda s: datetime.fromisoformat(s).astimezone()
+    cases = [
+        (fall, half, "2026-11-18", True), (last_winter, "MATH 1600B 001 LEC FW25: X", "2026-11-18", False),
+        (winter, "COMPSCI 2212B 001 LEC FW26: X", "2026-11-18", True),   # opens within a month
+        (fall, half, "2026-12-20", True),                                 # exams
+        (fall, half, "2027-01-15", False), (fall, full, "2027-01-15", True),
+        (winter, "COMPSCI 2212B 001 LEC FW26: X", "2027-03-01", True),
+        (fall, full, "2027-07-01", False),
+    ]
+    for access, name, when, want in cases:
+        assert _is_current(access, at(when), name) == want, (name, when, want)
+    print("current-course rule: all", len(cases), "cases ok")
 
     # tools registered w/ proper schemas?
     tools = await server.mcp.list_tools()

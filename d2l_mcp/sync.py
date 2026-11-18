@@ -130,6 +130,15 @@ async def sync_course(client: D2LClient, course: dict) -> dict:
     return stats
 
 
+def _has_preferred_twin(txt: Path) -> bool:
+    # profs often post the same lecture as "Lecture16.pdf" AND "Lecture16.pptx" in one folder.
+    # searching both = every hit shows up twice. keep the pptx (cleaner text + slide numbers), skip the pdf
+    original = txt.with_suffix("")  # "Lecture16.pdf.txt" -> "Lecture16.pdf"
+    if original.suffix.lower() != ".pdf":
+        return False
+    return (original.parent / (original.stem + ".pptx.txt")).exists()
+
+
 def search(query: str, course_folder: Path | None = None, max_hits: int = 20) -> list[dict]:
     """dumb-but-effective full text search over every extracted .txt (case-insensitive)
 
@@ -140,7 +149,7 @@ def search(query: str, course_folder: Path | None = None, max_hits: int = 20) ->
     q = query.lower()
     hits = []
     for txt in sorted(root.rglob("*.txt")):
-        if txt.name.startswith("_"):
+        if txt.name.startswith("_") or _has_preferred_twin(txt):
             continue
         text = txt.read_text(errors="ignore")
         low = text.lower()
