@@ -1,0 +1,21 @@
+[project]
+name = "d2l-mcp"
+version = "0.1.0"
+description = "MCP server for D2L Brightspace (Western OWL) — announcements, due dates, grades, and searchable course files"
+requires-python = ">=3.10"
+dependencies = [
+    "mcp>=2.3",
+    "httpx>=0.27",
+    "playwright>=1.45",
+    "pypdf>=4",
+    "python-pptx>=0.6",
+    "python-docx>=1.1",
+]
+
+[project.scripts]
+d2l-mcp = "d2l_mcp.server:main"
+d2l-mcp-login = "d2l_mcp.auth:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
